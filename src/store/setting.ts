@@ -26,6 +26,15 @@ export interface SettingStore {
   xAIApiProxy: string;
   xAIThinkingModel: string;
   xAINetworkingModel: string;
+  mistralApiKey: string;
+  mistralApiProxy: string;
+  mistralThinkingModel: string;
+  mistralNetworkingModel: string;
+  azureApiKey: string;
+  azureResourceName: string;
+  azureApiVersion: string;
+  azureThinkingModel: string;
+  azureNetworkingModel: string;
   openAICompatibleApiKey: string;
   openAICompatibleApiProxy: string;
   openAICompatibleThinkingModel: string;
@@ -50,8 +59,10 @@ export interface SettingStore {
   bochaApiKey: string;
   bochaApiProxy: string;
   searxngApiProxy: string;
+  searxngScope: string;
   parallelSearch: number;
   searchMaxResult: number;
+  crawler: string;
   language: string;
   theme: string;
   debug: string;
@@ -89,6 +100,15 @@ export const defaultValues: SettingStore = {
   xAIApiProxy: "",
   xAIThinkingModel: "",
   xAINetworkingModel: "",
+  mistralApiKey: "",
+  mistralApiProxy: "",
+  mistralThinkingModel: "mistral-large-latest",
+  mistralNetworkingModel: "mistral-medium-latest",
+  azureApiKey: "",
+  azureResourceName: "",
+  azureApiVersion: "",
+  azureThinkingModel: "",
+  azureNetworkingModel: "",
   openAICompatibleApiKey: "",
   openAICompatibleApiProxy: "",
   openAICompatibleThinkingModel: "",
@@ -111,8 +131,10 @@ export const defaultValues: SettingStore = {
   bochaApiKey: "",
   bochaApiProxy: "",
   searxngApiProxy: "",
+  searxngScope: "all",
   parallelSearch: 1,
   searchMaxResult: 5,
+  crawler: "jina",
   language: "",
   theme: "system",
   debug: "disable",

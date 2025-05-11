@@ -5,7 +5,11 @@ export function multiApiKeyPolling(apiKeys = "") {
 }
 
 export function isThinkingModel(model: string) {
-  return model.includes("thinking") || model.startsWith("gemini-2.5-pro");
+  return (
+    model.includes("thinking") ||
+    model.startsWith("gemini-2.5-pro") ||
+    model.startsWith("gemini-2.5-flash")
+  );
 }
 
 export function isNetworkingModel(model: string) {
@@ -14,7 +18,8 @@ export function isNetworkingModel(model: string) {
       !model.includes("lite") &&
       !model.includes("thinking") &&
       !model.includes("image")) ||
-    model.startsWith("gemini-2.5-pro")
+    model.startsWith("gemini-2.5-pro") ||
+    model.startsWith("gemini-2.5-flash")
   );
 }
 
@@ -100,6 +105,19 @@ export function filterPollinationsModelList(modelList: string[]) {
       model.startsWith("deepseek") ||
       model.startsWith("searchgpt")
     ) {
+      recommendModelList.push(model);
+    } else {
+      normalModelList.push(model);
+    }
+  });
+  return [recommendModelList, normalModelList];
+}
+
+export function filterMistralModelList(modelList: string[]) {
+  const recommendModelList: string[] = [];
+  const normalModelList: string[] = [];
+  modelList.filter((model) => {
+    if (model.includes("large-latest") || model.includes("medium-latest")) {
       recommendModelList.push(model);
     } else {
       normalModelList.push(model);
