@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { streamText } from "ai";
+import { streamText, type JSONValue, type Tool } from "ai";
 import { parsePartialJson } from "@ai-sdk/ui-utils";
 import { openai } from "@ai-sdk/openai";
 import { type GoogleGenerativeAIProviderMetadata } from "@ai-sdk/google";
@@ -26,26 +26,15 @@ import {
   getSERPQuerySchema,
 } from "@/utils/deep-research/prompts";
 import { isNetworkingModel } from "@/utils/model";
+import { ThinkTagStreamProcessor, removeJsonMarkdown } from "@/utils/text";
 import { parseError } from "@/utils/error";
 import { pick, flat, unique } from "radash";
 
-function getResponseLanguagePrompt(lang: string) {
-  return `**Respond in ${lang}**`;
-}
+type ProviderOptions = Record<string, Record<string, JSONValue>>;
+type Tools = Record<string, Tool>;
 
-function removeJsonMarkdown(text: string) {
-  text = text.trim();
-  if (text.startsWith("```json")) {
-    text = text.slice(7);
-  } else if (text.startsWith("json")) {
-    text = text.slice(4);
-  } else if (text.startsWith("```")) {
-    text = text.slice(3);
-  }
-  if (text.endsWith("```")) {
-    text = text.slice(0, -3);
-  }
-  return text.trim();
+function getResponseLanguagePrompt() {
+  return `**Respond in the same language as the user's language**`;
 }
 
 function handleError(error: unknown) {
@@ -61,53 +50,79 @@ function useDeepResearch() {
   const [status, setStatus] = useState<string>("");
 
   async function askQuestions() {
-    const { language } = useSettingStore.getState();
     const { question } = useTaskStore.getState();
     const { thinkingModel } = getModel();
     setStatus(t("research.common.thinking"));
+    const thinkTagStreamProcessor = new ThinkTagStreamProcessor();
     const result = streamText({
       model: await createModelProvider(thinkingModel),
       system: getSystemPrompt(),
       prompt: [
         generateQuestionsPrompt(question),
-        getResponseLanguagePrompt(language),
+        getResponseLanguagePrompt(),
       ].join("\n\n"),
       onError: handleError,
     });
     let content = "";
+    let reasoning = "";
     taskStore.setQuestion(question);
-    for await (const textPart of result.textStream) {
-      content += textPart;
-      taskStore.updateQuestions(content);
+    for await (const part of result.fullStream) {
+      if (part.type === "text-delta") {
+        thinkTagStreamProcessor.processChunk(
+          part.textDelta,
+          (data) => {
+            content += data;
+            taskStore.updateQuestions(content);
+          },
+          (data) => {
+            reasoning += data;
+          }
+        );
+      } else if (part.type === "reasoning") {
+        reasoning += part.textDelta;
+      }
     }
+    if (reasoning) console.log(reasoning);
   }
 
   async function writeReportPlan() {
-    const { language } = useSettingStore.getState();
     const { query } = useTaskStore.getState();
     const { thinkingModel } = getModel();
     setStatus(t("research.common.thinking"));
+    const thinkTagStreamProcessor = new ThinkTagStreamProcessor();
     const result = streamText({
       model: await createModelProvider(thinkingModel),
       system: getSystemPrompt(),
-      prompt: [
-        writeReportPlanPrompt(query),
-        getResponseLanguagePrompt(language),
-      ].join("\n\n"),
+      prompt: [writeReportPlanPrompt(query), getResponseLanguagePrompt()].join(
+        "\n\n"
+      ),
       onError: handleError,
     });
     let content = "";
-    for await (const textPart of result.textStream) {
-      content += textPart;
-      taskStore.updateReportPlan(content);
+    let reasoning = "";
+    for await (const part of result.fullStream) {
+      if (part.type === "text-delta") {
+        thinkTagStreamProcessor.processChunk(
+          part.textDelta,
+          (data) => {
+            content += data;
+            taskStore.updateReportPlan(content);
+          },
+          (data) => {
+            reasoning += data;
+          }
+        );
+      } else if (part.type === "reasoning") {
+        reasoning += part.textDelta;
+      }
     }
+    if (reasoning) console.log(reasoning);
     return content;
   }
 
   async function searchLocalKnowledges(query: string, researchGoal: string) {
     const { resources } = useTaskStore.getState();
     const knowledgeStore = useKnowledgeStore.getState();
-    const { language } = useSettingStore.getState();
     const knowledges: Knowledge[] = [];
 
     for (const item of resources) {
@@ -120,20 +135,35 @@ function useDeepResearch() {
     }
 
     const { networkingModel } = getModel();
+    const thinkTagStreamProcessor = new ThinkTagStreamProcessor();
     const searchResult = streamText({
       model: await createModelProvider(networkingModel),
       system: getSystemPrompt(),
       prompt: [
         processSearchKnowledgeResultPrompt(query, researchGoal, knowledges),
-        getResponseLanguagePrompt(language),
+        getResponseLanguagePrompt(),
       ].join("\n\n"),
       onError: handleError,
     });
     let content = "";
-    for await (const textPart of searchResult.textStream) {
-      content += textPart;
-      taskStore.updateTask(query, { learning: content });
+    let reasoning = "";
+    for await (const part of searchResult.fullStream) {
+      if (part.type === "text-delta") {
+        thinkTagStreamProcessor.processChunk(
+          part.textDelta,
+          (data) => {
+            content += data;
+            taskStore.updateTask(query, { learning: content });
+          },
+          (data) => {
+            reasoning += data;
+          }
+        );
+      } else if (part.type === "reasoning") {
+        reasoning += part.textDelta;
+      }
     }
+    if (reasoning) console.log(reasoning);
     return content;
   }
 
@@ -145,12 +175,12 @@ function useDeepResearch() {
       parallelSearch,
       searchMaxResult,
       references,
-      language,
     } = useSettingStore.getState();
     const { resources } = useTaskStore.getState();
     const { networkingModel } = getModel();
     setStatus(t("research.common.research"));
     const plimit = Plimit(parallelSearch);
+    const thinkTagStreamProcessor = new ThinkTagStreamProcessor();
     const createModel = (model: string) => {
       // Enable Gemini's built-in search tool
       if (
@@ -166,47 +196,57 @@ function useDeepResearch() {
     };
     const getTools = (model: string) => {
       // Enable OpenAI's built-in search tool
-      if (
-        enableSearch &&
-        searchProvider === "model" &&
-        ["openai", "azure"].includes(provider) &&
-        model.startsWith("gpt-4o")
-      ) {
-        return {
-          web_search_preview: openai.tools.webSearchPreview({
-            // optional configuration:
-            searchContextSize: "medium",
-          }),
-        };
-      } else {
-        return undefined;
+      if (enableSearch && searchProvider === "model") {
+        if (
+          ["openai", "azure"].includes(provider) &&
+          model.startsWith("gpt-4o")
+        ) {
+          return {
+            web_search_preview: openai.tools.webSearchPreview({
+              // optional configuration:
+              searchContextSize: "medium",
+            }),
+          } as Tools;
+        }
       }
+      return undefined;
     };
-    const getProviderOptions = () => {
-      // Enable OpenRouter's built-in search tool
-      if (
-        enableSearch &&
-        searchProvider === "model" &&
-        provider === "openrouter"
-      ) {
-        return {
-          openrouter: {
-            plugins: [
-              {
-                id: "web",
-                max_results: searchMaxResult, // Defaults to 5
+    const getProviderOptions = (model: string) => {
+      if (enableSearch && searchProvider === "model") {
+        // Enable OpenRouter's built-in search tool
+        if (provider === "openrouter") {
+          return {
+            openrouter: {
+              plugins: [
+                {
+                  id: "web",
+                  max_results: searchMaxResult, // Defaults to 5
+                },
+              ],
+            },
+          } as ProviderOptions;
+        } else if (
+          provider === "xai" &&
+          model.startsWith("grok-3") &&
+          !model.includes("mini")
+        ) {
+          return {
+            xai: {
+              search_parameters: {
+                mode: "auto",
+                max_search_results: searchMaxResult,
               },
-            ],
-          },
-        };
-      } else {
-        return undefined;
+            },
+          } as ProviderOptions;
+        }
       }
+      return undefined;
     };
     await Promise.all(
       queries.map((item) => {
         plimit(async () => {
           let content = "";
+          let reasoning = "";
           let searchResult;
           let sources: Source[] = [];
           let images: ImageSource[] = [];
@@ -254,7 +294,7 @@ function useDeepResearch() {
                     sources,
                     enableReferences
                   ),
-                  getResponseLanguagePrompt(language),
+                  getResponseLanguagePrompt(),
                 ].join("\n\n"),
                 onError: handleError,
               });
@@ -264,10 +304,10 @@ function useDeepResearch() {
                 system: getSystemPrompt(),
                 prompt: [
                   processResultPrompt(item.query, item.researchGoal),
-                  getResponseLanguagePrompt(language),
+                  getResponseLanguagePrompt(),
                 ].join("\n\n"),
                 tools: getTools(networkingModel),
-                providerOptions: getProviderOptions(),
+                providerOptions: getProviderOptions(networkingModel),
                 onError: handleError,
               });
             }
@@ -277,7 +317,7 @@ function useDeepResearch() {
               system: getSystemPrompt(),
               prompt: [
                 processResultPrompt(item.query, item.researchGoal),
-                getResponseLanguagePrompt(language),
+                getResponseLanguagePrompt(),
               ].join("\n\n"),
               onError: (err) => {
                 taskStore.updateTask(item.query, { state: "failed" });
@@ -287,10 +327,18 @@ function useDeepResearch() {
           }
           for await (const part of searchResult.fullStream) {
             if (part.type === "text-delta") {
-              content += part.textDelta;
-              taskStore.updateTask(item.query, { learning: content });
+              thinkTagStreamProcessor.processChunk(
+                part.textDelta,
+                (data) => {
+                  content += data;
+                  taskStore.updateTask(item.query, { learning: content });
+                },
+                (data) => {
+                  reasoning += data;
+                }
+              );
             } else if (part.type === "reasoning") {
-              console.log("reasoning", part.textDelta);
+              reasoning += part.textDelta;
             } else if (part.type === "source") {
               sources.push(part.source);
             } else if (part.type === "finish") {
@@ -319,6 +367,8 @@ function useDeepResearch() {
               }
             }
           }
+          if (reasoning) console.log(reasoning);
+
           if (sources.length > 0) {
             content +=
               "\n\n" +
@@ -344,42 +394,54 @@ function useDeepResearch() {
   }
 
   async function reviewSearchResult() {
-    const { language } = useSettingStore.getState();
     const { reportPlan, tasks, suggestion } = useTaskStore.getState();
     const { thinkingModel } = getModel();
     setStatus(t("research.common.research"));
     const learnings = tasks.map((item) => item.learning);
+    const thinkTagStreamProcessor = new ThinkTagStreamProcessor();
     const result = streamText({
       model: await createModelProvider(thinkingModel),
       system: getSystemPrompt(),
       prompt: [
         reviewSerpQueriesPrompt(reportPlan, learnings, suggestion),
-        getResponseLanguagePrompt(language),
+        getResponseLanguagePrompt(),
       ].join("\n\n"),
       onError: handleError,
     });
 
     const querySchema = getSERPQuerySchema();
     let content = "";
-    let queries = [];
+    let reasoning = "";
+    let queries: SearchTask[] = [];
     for await (const textPart of result.textStream) {
-      content += textPart;
-      const data: PartialJson = parsePartialJson(removeJsonMarkdown(content));
-      if (
-        querySchema.safeParse(data.value) &&
-        data.state === "successful-parse"
-      ) {
-        if (data.value) {
-          queries = data.value.map(
-            (item: { query: string; researchGoal: string }) => ({
-              state: "unprocessed",
-              learning: "",
-              ...pick(item, ["query", "researchGoal"]),
-            })
+      thinkTagStreamProcessor.processChunk(
+        textPart,
+        (text) => {
+          content += text;
+          const data: PartialJson = parsePartialJson(
+            removeJsonMarkdown(content)
           );
+          if (
+            querySchema.safeParse(data.value) &&
+            data.state === "successful-parse"
+          ) {
+            if (data.value) {
+              queries = data.value.map(
+                (item: { query: string; researchGoal: string }) => ({
+                  state: "unprocessed",
+                  learning: "",
+                  ...pick(item, ["query", "researchGoal"]),
+                })
+              );
+            }
+          }
+        },
+        (text) => {
+          reasoning += text;
         }
-      }
+      );
     }
+    if (reasoning) console.log(reasoning);
     if (queries.length > 0) {
       taskStore.update([...tasks, ...queries]);
       await runSearchTask(queries);
@@ -387,7 +449,7 @@ function useDeepResearch() {
   }
 
   async function writeFinalReport() {
-    const { citationImage, references, language } = useSettingStore.getState();
+    const { citationImage, references } = useSettingStore.getState();
     const {
       reportPlan,
       tasks,
@@ -414,6 +476,7 @@ function useDeepResearch() {
     );
     const enableCitationImage = citationImage === "enable";
     const enableReferences = references === "enable";
+    const thinkTagStreamProcessor = new ThinkTagStreamProcessor();
     const result = streamText({
       model: await createModelProvider(thinkingModel),
       system: [getSystemPrompt(), outputGuidelinesPrompt].join("\n\n"),
@@ -427,15 +490,29 @@ function useDeepResearch() {
           enableCitationImage,
           enableReferences
         ),
-        getResponseLanguagePrompt(language),
+        getResponseLanguagePrompt(),
       ].join("\n\n"),
       onError: handleError,
     });
     let content = "";
-    for await (const textPart of result.textStream) {
-      content += textPart;
-      updateFinalReport(content);
+    let reasoning = "";
+    for await (const part of result.fullStream) {
+      if (part.type === "text-delta") {
+        thinkTagStreamProcessor.processChunk(
+          part.textDelta,
+          (data) => {
+            content += data;
+            updateFinalReport(content);
+          },
+          (data) => {
+            reasoning += data;
+          }
+        );
+      } else if (part.type === "reasoning") {
+        reasoning += part.textDelta;
+      }
     }
+    if (reasoning) console.log(reasoning);
     if (sources.length > 0) {
       content +=
         "\n\n" +
@@ -462,45 +539,57 @@ function useDeepResearch() {
   }
 
   async function deepResearch() {
-    const { language } = useSettingStore.getState();
     const { reportPlan } = useTaskStore.getState();
     const { thinkingModel } = getModel();
     setStatus(t("research.common.thinking"));
     try {
-      let queries = [];
+      const thinkTagStreamProcessor = new ThinkTagStreamProcessor();
       const result = streamText({
         model: await createModelProvider(thinkingModel),
         system: getSystemPrompt(),
         prompt: [
           generateSerpQueriesPrompt(reportPlan),
-          getResponseLanguagePrompt(language),
+          getResponseLanguagePrompt(),
         ].join("\n\n"),
         onError: handleError,
       });
 
       const querySchema = getSERPQuerySchema();
       let content = "";
+      let reasoning = "";
+      let queries: SearchTask[] = [];
       for await (const textPart of result.textStream) {
-        content += textPart;
-        const data: PartialJson = parsePartialJson(removeJsonMarkdown(content));
-        if (querySchema.safeParse(data.value)) {
-          if (
-            data.state === "repaired-parse" ||
-            data.state === "successful-parse"
-          ) {
-            if (data.value) {
-              queries = data.value.map(
-                (item: { query: string; researchGoal: string }) => ({
-                  state: "unprocessed",
-                  learning: "",
-                  ...pick(item, ["query", "researchGoal"]),
-                })
-              );
-              taskStore.update(queries);
+        thinkTagStreamProcessor.processChunk(
+          textPart,
+          (text) => {
+            content += text;
+            const data: PartialJson = parsePartialJson(
+              removeJsonMarkdown(content)
+            );
+            if (querySchema.safeParse(data.value)) {
+              if (
+                data.state === "repaired-parse" ||
+                data.state === "successful-parse"
+              ) {
+                if (data.value) {
+                  queries = data.value.map(
+                    (item: { query: string; researchGoal: string }) => ({
+                      state: "unprocessed",
+                      learning: "",
+                      ...pick(item, ["query", "researchGoal"]),
+                    })
+                  );
+                  taskStore.update(queries);
+                }
+              }
             }
+          },
+          (text) => {
+            reasoning += text;
           }
-        }
+        );
       }
+      if (reasoning) console.log(reasoning);
       await runSearchTask(queries);
     } catch (err) {
       console.error(err);
